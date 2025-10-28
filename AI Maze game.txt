@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Maze Chase</title>
+    <script src="https://cdn/tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=VT323&display=swap');
+        body {
+            font-family: 'VT323', monospace;
+            background-color: #0d0d0d;
+            color: #00ff00;
+            overflow: hidden;
+        }
+        .game-wrapper {
+            position: relative; /* <-- Added this */
+            border: 4px solid #333;
+            border-radius: 10px;
+            box-shadow: 0 0 25px rgba(0, 255, 0, 0.4), inset 0 0 15px rgba(0, 255, 0, 0.2);
+            padding: 1rem;
+            background: #111;
+        }
+        #gameCanvas {
+            background-color: #000;
+            border: 2px solid #222;
+        }
+        .touch-controls {
+            display: none; /* Hidden by default */
+        }
+        @media (max-width: 768px) {
+            .controls-info {
+                display: none;
+            }
+            .touch-controls {
+                display: grid;
+                grid-template-columns: repeat(3, 1fr);
+                grid-template-rows: repeat(2, 1fr);
+                gap: 15px;
+                width: 240px;
+                margin: 20px auto 0;
+            }
+            .touch-btn {
+                background-color: rgba(0, 255, 0, 0.1);
+                border: 2px solid rgba(0, 255, 0, 0.5);
+                border-radius: 50%;
+                width: 60px;
+                height: 60px;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                font-size: 2rem;
+                color: #00ff00;
+                cursor: pointer;
+                user-select: none;
+                transition: background-color 0.2s, transform 0.1s;
+            }
+            .touch-btn:active {
+                background-color: rgba(0, 255, 0, 0.3);
+                transform: scale(0.95);
+            }
+            .up { grid-area: 1 / 2 / 2 / 3; }
+            .left { grid-area: 2 / 1 / 3 / 2; }
+            .down { grid-area: 2 / 2 / 3 / 3; }
+            .right { grid-area: 2 / 3 / 3 / 4; }
+        }
+
+        /* Animation for the "CAUGHT!" message */
+        @keyframes flash-neon {
+            0%, 100% { 
+                opacity: 1; 
+                text-shadow: 0 0 10px #ff00ff, 0 0 20px #ff00ff, 0 0 30px #ff00ff, 0 0 40px #ff00ff;
+            }
+            50% { 
+                opacity: 0.7; 
+                text-shadow: 0 0 5px #ff00ff, 0 0 10px #ff00ff;
+            }
+        }
+        .flashing-caught {
+            animation: flash-neon 0.8s infinite;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body class="flex flex-col items-center justify-center min-h-screen p-4">
+
+    <div class="game-wrapper">
+        <div class="flex justify-between items-center mb-2 px-1 text-2xl tracking-widest">
+            <h1>ORBS LEFT: <span id="orb-count">0</span></h1>
+            <h1 id="status-message" class="text-yellow-400"></h1>
+            <!-- Themed restart button moved to the header -->
+            <button id="restart-button" class="text-2xl text-green-500 hover:text-green-300 transition-colors focus:outline-none tracking-widest">[RESTART]</button>
+        </div>
+        <canvas id="gameCanvas" width="600" height="600"></canvas>
+        <!-- Game Over / Win Screen -->
+        <div id="end-screen" class="hidden absolute inset-0 bg-black bg-opacity-80 flex flex-col justify-center items-center">
+            <p id="end-message" class="text-6xl mb-6"></p>
+            <!-- Old button removed, new prompt added -->
+            <p class="text-xl mt-4 text-gray-400 animate-pulse">Press [RESTART] to play again.</p>
+        </div>
+    </div>
+    <p class="controls-info mt-4 text-xl text-gray-500">Use ARROW KEYS to move.</p>
+
+    <!-- Touch controls for mobile -->
+    <div class="touch-controls">
+        <button class="touch-btn up" id="up-btn">▲</button>
+        <button class="touch-btn left" id="left-btn">◀</button>
+        <button class="touch-btn down" id="down-btn">▼</button>
+        <button class="touch-btn right" id="right-btn">▶</button>
+    </div>
+
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const orbCountEl = document.getElementById('orb-count');
+        const statusMessageEl = document.getElementById('status-message');
+        const endScreenEl = document.getElementById('end-screen');
+        const endMessageEl = document.getElementById('end-message');
+        const restartButton = document.getElementById('restart-button');
+
+        // --- Game Configuration ---
+        const GRID_SIZE = 30;
+        const CHARACTER_SIZE = GRID_SIZE * 0.8;
+        const CHARACTER_OFFSET = (GRID_SIZE - CHARACTER_SIZE) / 2;
+        const ROWS = canvas.height / GRID_SIZE;
+        const COLS = canvas.width / GRID_SIZE;
+        const PLAYER_COLOR = '#00ffff'; // Cyan
+        const AI_COLOR = '#ff00ff';     // Magenta
+        const WALL_COLOR = '#006400';   // Dark Green
+        const ORB_COLOR = '#ffff00';    // Yellow
+        const PLAYER_SPEED = 2.5;
+        const INITIAL_AI_SPEED = 1.5;
+        const MAX_AI_SPEED = 3.0;
+        const AI_PATH_RECALC_RATE = 30; // Recalculate path every 30 frames
+
+        // --- Maze Layout (1 = wall, 0 = path) ---
+        const maze = [
+            [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+            [1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1],
+            [1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1],
+            [1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1],
+            [1, 0, 1, 1, 1, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 1],
+            [1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1],
+            [1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1],
+            [1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1],
+            [1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 0, 1],
+            [1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1],
+            [1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1],
+            [1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1],
+            [1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+            [1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 1],
+            [1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1],
+            [1, 0, 1, 1, 1, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1],
+            [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1],
+            [1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 1],
+            [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+        ];
+
+        // --- Game State ---
+        let player, ai, orbs;
+        let keys = {};
+        let gameOver = false;
+        let animationFrameId;
+        let currentAiSpeed;
+        let initialOrbCount;
+        let aiPathRecalcCounter = 0;
+
+        // --- Entity Class for Smooth Movement ---
+        class Entity {
+            constructor(x, y, color) {
+                // X and Y are now pixel coordinates, not grid indices
+                this.x = x;
+                this.y = y;
+                this.color = color;
+                this.path = [];
+                this.wanderTarget = null; // Target for when it has no path to the player
+            }
+            draw() {
+                ctx.fillStyle = this.color;
+                ctx.shadowColor = this.color;
+                ctx.shadowBlur = 10;
+                ctx.fillRect(this.x + CHARACTER_OFFSET, this.y + CHARACTER_OFFSET, CHARACTER_SIZE, CHARACTER_SIZE);
+                ctx.shadowBlur = 0;
+            }
+            getGridPos() {
+                return {
+                    x: Math.floor((this.x + GRID_SIZE / 2) / GRID_SIZE),
+                    y: Math.floor((this.y + GRID_SIZE / 2) / GRID_SIZE),
+                };
+            }
+        }
+        
+        function init() {
+            gameOver = false;
+            endScreenEl.classList.add('hidden');
+            statusMessageEl.textContent = "";
+            keys = {}; // <-- Added this to reset all keys
+
+            player = new Entity(GRID_SIZE * 1, GRID_SIZE * 1, PLAYER_COLOR);
+            ai = new Entity(GRID_SIZE * (COLS - 2), GRID_SIZE * (ROWS - 2), AI_COLOR);
+            orbs = [];
+            
+            for (let r = 0; r < ROWS; r++) {
+                for (let c = 0; c < COLS; c++) {
+                    if (maze[r][c] === 0) {
+                        const playerGridStart = { x: 1, y: 1 };
+                        const aiGridStart = { x: COLS - 2, y: ROWS - 2 };
+                        if (Math.abs(r - playerGridStart.y) + Math.abs(c - playerGridStart.x) > 4 &&
+                            Math.abs(r - aiGridStart.y) + Math.abs(c - aiGridStart.x) > 4) {
+                             if(Math.random() < 0.15) {
+                                orbs.push(new Entity(c * GRID_SIZE, r * GRID_SIZE, ORB_COLOR));
+                             }
+                        }
+                    }
+                }
+            }
+            orbCountEl.textContent = orbs.length;
+            initialOrbCount = orbs.length;
+            currentAiSpeed = INITIAL_AI_SPEED;
+
+            if (animationFrameId) cancelAnimationFrame(animationFrameId);
+            gameLoop();
+        }
+        
+        // --- Collision and Pathfinding ---
+        function isWallAtPixel(px, py) {
+            if (px < 0 || px >= canvas.width || py < 0 || py >= canvas.height) return true;
+            const gridX = Math.floor(px / GRID_SIZE);
+            const gridY = Math.floor(py / GRID_SIZE);
+            return maze[gridY][gridX] === 1;
+        }
+
+        function canMove(entity, dx, dy) {
+            const charX = entity.x + CHARACTER_OFFSET;
+            const charY = entity.y + CHARACTER_OFFSET;
+            const newX = charX + dx;
+            const newY = charY + dy;
+
+            // Check all 4 corners of the entity's future bounding box
+            if (isWallAtPixel(newX, newY)) return false;
+            if (isWallAtPixel(newX + CHARACTER_SIZE - 1, newY)) return false;
+            if (isWallAtPixel(newX, newY + CHARACTER_SIZE - 1)) return false;
+            if (isWallAtPixel(newX + CHARACTER_SIZE - 1, newY + CHARACTER_SIZE - 1)) return false;
+            return true;
+        }
+        
+        function bfsPathfind(startGrid, endGrid) {
+            const queue = [[startGrid]];
+            const visited = new Set([`${startGrid.x},${startGrid.y}`]);
+            const directions = [[0, 1], [0, -1], [1, 0], [-1, 0]];
+
+            while (queue.length > 0) {
+                const path = queue.shift();
+                const { x, y } = path[path.length - 1];
+
+                if (x === endGrid.x && y === endGrid.y) return path;
+
+                for (const [dx, dy] of directions) {
+                    const nextX = x + dx;
+                    const nextY = y + dy;
+
+                    if (nextX >= 0 && nextX < COLS && nextY >= 0 && nextY < ROWS &&
+                        maze[nextY][nextX] === 0 && !visited.has(`${nextX},${nextY}`)) {
+                        visited.add(`${nextX},${nextY}`);
+                        const newPath = [...path, { x: nextX, y: nextY }];
+                        queue.push(newPath);
+                    }
+                }
+            }
+            return []; // No path found
+        }
+
+        function update() {
+            if (gameOver) return;
+
+            // --- Player Movement ---
+            let dx = 0;
+            let dy = 0;
+            if (keys['ArrowUp']) dy = -PLAYER_SPEED;
+            if (keys['ArrowDown']) dy = PLAYER_SPEED;
+            if (keys['ArrowLeft']) dx = -PLAYER_SPEED;
+            if (keys['ArrowRight']) dx = PLAYER_SPEED;
+
+            if (canMove(player, dx, 0)) player.x += dx;
+            if (canMove(player, 0, dy)) player.y += dy;
+
+            // --- AI Movement ---
+            aiPathRecalcCounter++;
+            if (aiPathRecalcCounter >= AI_PATH_RECALC_RATE) {
+                aiPathRecalcCounter = 0;
+                const aiGridPos = ai.getGridPos();
+                const playerGridPos = player.getGridPos();
+                ai.path = bfsPathfind(aiGridPos, playerGridPos);
+            }
+            
+            let targetX, targetY;
+            let isWandering = false;
+
+            // If the AI has a path to the player, follow it.
+            if (ai.path.length > 1) {
+                const nextWaypoint = ai.path[1];
+                targetX = nextWaypoint.x * GRID_SIZE;
+                targetY = nextWaypoint.y * GRID_SIZE;
+                ai.wanderTarget = null; // Clear wander target when chasing
+            } else {
+                // Otherwise, enter wander mode.
+                isWandering = true;
+                // Get a new wander target if needed (none exists or we arrived at the old one)
+                if (!ai.wanderTarget || (Math.abs(ai.x - ai.wanderTarget.x) < currentAiSpeed && Math.abs(ai.y - ai.wanderTarget.y) < currentAiSpeed)) {
+                    const aiGridPos = ai.getGridPos();
+                    const directions = [[0, 1], [0, -1], [1, 0], [-1, 0]];
+                    const validMoves = [];
+                    for (const [dx, dy] of directions) {
+                        const nextX = aiGridPos.x + dx;
+                        const nextY = aiGridPos.y + dy;
+                        if (nextX >= 0 && nextX < COLS && nextY >= 0 && nextY < ROWS && maze[nextY][nextX] === 0) {
+                            validMoves.push({ x: nextX, y: nextY });
+                        }
+                    }
+                    if (validMoves.length > 0) {
+                        const nextMove = validMoves[Math.floor(Math.random() * validMoves.length)];
+                        ai.wanderTarget = { x: nextMove.x * GRID_SIZE, y: nextMove.y * GRID_SIZE };
+                    }
+                }
+                
+                if (ai.wanderTarget) {
+                    targetX = ai.wanderTarget.x;
+                    targetY = ai.wanderTarget.y;
+                }
+            }
+
+            // Move towards the current target (either from pathfinding or wandering)
+            if (targetX !== undefined && targetY !== undefined) {
+                const dirX = targetX - ai.x;
+                const dirY = targetY - ai.y;
+                const magnitude = Math.sqrt(dirX * dirX + dirY * dirY);
+
+                if (magnitude > 1) {
+                    // Use a slower, constant speed when wandering, and the ramping speed when chasing.
+                    const speed = isWandering ? INITIAL_AI_SPEED * 0.9 : currentAiSpeed;
+                    const moveX = (dirX / magnitude) * speed;
+                    const moveY = (dirY / magnitude) * speed;
+
+                    // Apply collision detection on each axis separately
+                    if (canMove(ai, moveX, 0)) {
+                        ai.x += moveX;
+                    }
+                    if (canMove(ai, 0, moveY)) {
+                        ai.y += moveY;
+                    }
+                }
+            }
+
+
+            // --- Collision Detection ---
+            // Player and Orbs
+            for (let i = orbs.length - 1; i >= 0; i--) {
+                const orb = orbs[i];
+                if (Math.abs(player.x - orb.x) < CHARACTER_SIZE &&
+                    Math.abs(player.y - orb.y) < CHARACTER_SIZE) {
+                    orbs.splice(i, 1);
+                    orbCountEl.textContent = orbs.length;
+
+                    const progress = 1 - (orbs.length / initialOrbCount);
+                    const speedRange = MAX_AI_SPEED - INITIAL_AI_SPEED;
+                    currentAiSpeed = INITIAL_AI_SPEED + (progress * speedRange);
+
+                    statusMessageEl.textContent = "HUNTER IS FASTER!";
+                    setTimeout(() => { if (!gameOver) statusMessageEl.textContent = ""; }, 1500);
+                }
+            }
+
+            // Player and AI
+            if (Math.abs(player.x - ai.x) < CHARACTER_SIZE &&
+                Math.abs(player.y - ai.y) < CHARACTER_SIZE) {
+                endGame(false);
+            }
+
+            // --- Check Win Condition ---
+            if (orbs.length === 0) {
+                endGame(true);
+            }
+        }
+        
+        function draw() {
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            for (let r = 0; r < ROWS; r++) {
+                for (let c = 0; c < COLS; c++) {
+                    if (maze[r][c] === 1) {
+                        ctx.fillStyle = WALL_COLOR;
+                        ctx.fillRect(c * GRID_SIZE, r * GRID_SIZE, GRID_SIZE, GRID_SIZE);
+                    }
+                }
+            }
+            orbs.forEach(orb => orb.draw());
+            player.draw();
+            ai.draw();
+        }
+
+        function gameLoop() {
+            update();
+            draw();
+            animationFrameId = requestAnimationFrame(gameLoop);
+        }
+
+        function endGame(playerWon) {
+            gameOver = true;
+            cancelAnimationFrame(animationFrameId);
+            
+            // --- Replaced positioning logic to be relative to the wrapper ---
+            endScreenEl.style.position = 'absolute';
+            endScreenEl.style.left = `${canvas.offsetLeft}px`;
+            endScreenEl.style.top = `${canvas.offsetTop}px`;
+            endScreenEl.style.width = `${canvas.offsetWidth}px`;
+            endScreenEl.style.height = `${canvas.offsetHeight}px`;
+            // --- End of replaced logic ---
+
+            if (playerWon) {
+                endMessageEl.textContent = 'YOU ESCAPED!';
+                endMessageEl.style.color = '#00ffff';
+                // Ensure flashing class is removed if player wins
+                endMessageEl.classList.remove('flashing-caught', 'text-9xl');
+                endMessageEl.classList.add('text-6xl');
+            } else {
+                endMessageEl.textContent = 'CAUGHT!';
+                endMessageEl.style.color = '#ff00ff';
+                // Add flashing and size classes for "CAUGHT!"
+                endMessageEl.classList.remove('text-6xl');
+                endMessageEl.classList.add('flashing-caught', 'text-9xl');
+            }
+            endScreenEl.classList.remove('hidden');
+        }
+
+        // --- Event Listeners ---
+        window.addEventListener('keydown', e => { keys[e.key] = true; });
+        window.addEventListener('keyup', e => { keys[e.key] = false; });
+        
+        restartButton.addEventListener('click', init);
+
+        // Touch Controls
+        const setupTouchControl = (btnId, key) => {
+            const btn = document.getElementById(btnId);
+            btn.addEventListener('touchstart', (e) => { e.preventDefault(); keys[key] = true; }, { passive: false });
+            btn.addEventListener('touchend', (e) => { e.preventDefault(); keys[key] = false; }, { passive: false });
+            btn.addEventListener('mousedown', (e) => { e.preventDefault(); keys[key] = true; }, { passive: false });
+            btn.addEventListener('mouseup', (e) => { e.preventDefault(); keys[key] = false; }, { passive: false });
+            btn.addEventListener('mouseleave', (e) => { keys[key] = false; });
+        };
+
+        setupTouchControl('up-btn', 'ArrowUp');
+        setupTouchControl('down-btn', 'ArrowDown');
+        setupTouchControl('left-btn', 'ArrowLeft');
+        setupTouchControl('right-btn', 'ArrowRight');
+
+        // --- Start Game ---
+        init();
+    </script>
+</body>
+</html>
+
+
+
+
+
+
+
